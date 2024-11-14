@@ -149,7 +149,7 @@ type ComponentMap map[string]*Component
 // Recipe is the data model of the pipeline recipe
 type Recipe struct {
 	Version   string               `json:"version,omitempty" yaml:"version,omitempty"`
-	On        *On                  `json:"on,omitempty" yaml:"on,omitempty"`
+	On        map[string]*Event    `json:"on,omitempty" yaml:"on,omitempty"`
 	Component ComponentMap         `json:"component,omitempty" yaml:"component,omitempty"`
 	Variable  map[string]*Variable `json:"variable,omitempty" yaml:"variable,omitempty"`
 	Secret    map[string]string    `json:"secret,omitempty" yaml:"secret,omitempty"`
@@ -272,30 +272,24 @@ func (p *PipelineRelease) AfterFind(tx *gorm.DB) (err error) {
 }
 
 type Variable struct {
-	Title              string   `json:"title,omitempty" yaml:"title,omitempty"`
-	Description        string   `json:"description,omitempty" yaml:"description,omitempty"`
-	InstillFormat      string   `json:"instillFormat,omitempty" yaml:"instill-format,omitempty"`
-	InstillUIOrder     int32    `json:"instillUiOrder,omitempty" yaml:"instill-ui-order,omitempty"`
-	InstillUIMultiline bool     `json:"instillUiMultiline,omitempty" yaml:"instill-ui-multiline,omitempty"`
-	Listen             []string `json:"listen,omitempty" yaml:"listen,omitempty"`
+	Title       string   `json:"title,omitempty" yaml:"title,omitempty"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Format      string   `json:"format,omitempty" yaml:"format,omitempty"`
+	Listen      []string `json:"listen,omitempty" yaml:"listen,omitempty"`
+	Default     any      `json:"default,omitempty" yaml:"default,omitempty"`
 }
 
 type Output struct {
-	Title          string `json:"title,omitempty" yaml:"title,omitempty"`
-	Description    string `json:"description,omitempty" yaml:"description,omitempty"`
-	Value          string `json:"value,omitempty" yaml:"value,omitempty"`
-	InstillUIOrder int32  `json:"instillUiOrder,omitempty" yaml:"instill-ui-order,omitempty"`
-}
-
-type On struct {
-	Event    map[string]*Event    `json:"event,omitempty" yaml:"event,omitempty"`
-	Schedule map[string]*Schedule `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+	Title       string `json:"title,omitempty" yaml:"title,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Value       string `json:"value,omitempty" yaml:"value,omitempty"`
 }
 
 type Event struct {
-	Type  string         `json:"type,omitempty" yaml:"type,omitempty"`
-	Event string         `json:"event,omitempty" yaml:"event,omitempty"`
-	Setup map[string]any `json:"setup,omitempty" yaml:"setup,omitempty"`
+	Type   string         `json:"type,omitempty" yaml:"type,omitempty"`
+	Event  string         `json:"event,omitempty" yaml:"event,omitempty"`
+	Config map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
+	Setup  any            `json:"setup,omitempty" yaml:"setup,omitempty"`
 }
 
 type Schedule struct {

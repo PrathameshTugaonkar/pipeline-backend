@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/instill-ai/pipeline-backend/pkg/component/base"
+	"github.com/instill-ai/pipeline-backend/pkg/component/internal/util"
 )
 
 const (
@@ -45,7 +46,7 @@ type Base64 struct {
 func Init(bc base.Component) *component {
 	once.Do(func() {
 		comp = &component{Component: bc}
-		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil)
+		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -111,7 +112,7 @@ func Encode(str string) string {
 }
 
 func Decode(str string) (string, error) {
-	b, err := base64.StdEncoding.DecodeString(base.TrimBase64Mime(str))
+	b, err := base64.StdEncoding.DecodeString(util.TrimBase64Mime(str))
 	if err != nil {
 		return str, err
 	}

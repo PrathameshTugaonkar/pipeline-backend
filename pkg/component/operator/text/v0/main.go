@@ -38,7 +38,7 @@ type execution struct {
 func Init(bc base.Component) *component {
 	once.Do(func() {
 		comp = &component{Component: bc}
-		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil)
+		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -56,15 +56,11 @@ func (c *component) CreateExecution(x base.ComponentExecution) (base.IExecution,
 func (e *execution) Execute(ctx context.Context, jobs []*base.Job) error {
 
 	for _, job := range jobs {
-		input, err := job.Input.Read(ctx)
-		if err != nil {
-			job.Error.Error(ctx, err)
-			continue
-		}
 		switch e.Task {
 		case taskChunkText:
 			inputStruct := ChunkTextInput{}
-			err := base.ConvertFromStructpb(input, &inputStruct)
+
+			err := job.Input.ReadData(ctx, &inputStruct)
 			if err != nil {
 				job.Error.Error(ctx, err)
 				continue
@@ -81,12 +77,7 @@ func (e *execution) Execute(ctx context.Context, jobs []*base.Job) error {
 				job.Error.Error(ctx, err)
 				continue
 			}
-			output, err := base.ConvertToStructpb(outputStruct)
-			if err != nil {
-				job.Error.Error(ctx, err)
-				continue
-			}
-			err = job.Output.Write(ctx, output)
+			err = job.Output.WriteData(ctx, outputStruct)
 			if err != nil {
 				job.Error.Error(ctx, err)
 				continue

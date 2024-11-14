@@ -13,7 +13,6 @@ import (
 	"image/jpeg"
 	"image/png"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -33,13 +32,12 @@ import (
 	"github.com/instill-ai/pipeline-backend/config"
 	"github.com/instill-ai/pipeline-backend/pkg/acl"
 	"github.com/instill-ai/pipeline-backend/pkg/constant"
-	"github.com/instill-ai/pipeline-backend/pkg/data"
+	"github.com/instill-ai/pipeline-backend/pkg/data/path"
 	"github.com/instill-ai/pipeline-backend/pkg/datamodel"
 	"github.com/instill-ai/pipeline-backend/pkg/logger"
 	"github.com/instill-ai/pipeline-backend/pkg/recipe"
 	"github.com/instill-ai/pipeline-backend/pkg/repository"
 	"github.com/instill-ai/pipeline-backend/pkg/resource"
-	"github.com/instill-ai/pipeline-backend/pkg/utils"
 
 	componentbase "github.com/instill-ai/pipeline-backend/pkg/component/base"
 	componentstore "github.com/instill-ai/pipeline-backend/pkg/component/store"
@@ -366,10 +364,12 @@ func (c *converter) includeIteratorComponentDetail(ctx context.Context, ownerPer
 				if success {
 					s := &structpb.Struct{Fields: map[string]*structpb.Value{}}
 					s.Fields["type"] = structpb.NewStringValue("array")
-					if f := walk.GetStructValue().Fields["instillFormat"].GetStringValue(); f != "" {
-						// Limitation: console can not support more then three levels of array.
-						if strings.Count(f, "array:") < 2 {
-							s.Fields["instillFormat"] = structpb.NewStringValue("array:" + f)
+					if walk.GetStructValue() != nil && walk.GetStructValue().Fields["instillFormat"] != nil {
+						if f := walk.GetStructValue().Fields["instillFormat"].GetStringValue(); f != "" {
+							// Limitation: console can not support more then three levels of array.
+							if strings.Count(f, "array:") < 2 {
+								s.Fields["instillFormat"] = structpb.NewStringValue("array:" + f)
+							}
 						}
 					}
 					s.Fields["items"] = structpb.NewStructValue(walk.GetStructValue())
@@ -508,14 +508,6 @@ func (c *converter) ConvertPipelineToDB(ctx context.Context, ns resource.Namespa
 	}, nil
 }
 
-// ConnectorTypeToComponentType ...
-var ConnectorTypeToComponentType = map[pb.ConnectorType]pb.ComponentType{
-	pb.ConnectorType_CONNECTOR_TYPE_AI:          pb.ComponentType_COMPONENT_TYPE_AI,
-	pb.ConnectorType_CONNECTOR_TYPE_APPLICATION: pb.ComponentType_COMPONENT_TYPE_APPLICATION,
-	pb.ConnectorType_CONNECTOR_TYPE_DATA:        pb.ComponentType_COMPONENT_TYPE_DATA,
-	pb.ConnectorType_CONNECTOR_TYPE_GENERIC:     pb.ComponentType_COMPONENT_TYPE_GENERIC,
-}
-
 // ConvertPipelineToPB converts db data model to protobuf data model
 func (c *converter) ConvertPipelineToPB(ctx context.Context, dbPipelineOrigin *datamodel.Pipeline, view pb.Pipeline_View, checkPermission bool, useDynamicDef bool) (*pb.Pipeline, error) {
 
@@ -577,7 +569,7 @@ func (c *converter) ConvertPipelineToPB(ctx context.Context, dbPipelineOrigin *d
 			return nil, err
 		}
 		if dbPipeline.Recipe.On != nil {
-			for w := range dbPipeline.Recipe.On.Event {
+			for w := range dbPipeline.Recipe.On {
 				webhooks[w] = &pb.Endpoints_WebhookEndpoint{
 					Url: fmt.Sprintf(
 						"%s/v1beta/namespaces/%s/pipelines/%s/events?event=%s&code=%s",
@@ -673,7 +665,7 @@ func (c *converter) ConvertPipelineToPB(ctx context.Context, dbPipelineOrigin *d
 		}
 	}
 
-	if pbRecipe != nil && view == pb.Pipeline_VIEW_FULL && dbPipeline.Recipe.Variable != nil {
+	if pbRecipe != nil && view == pb.Pipeline_VIEW_FULL {
 		spec, err := c.GeneratePipelineDataSpec(dbPipeline.Recipe.Variable, dbPipeline.Recipe.Output, dbPipeline.Recipe.Component)
 		if err == nil {
 			pbPipeline.DataSpecification = spec
@@ -803,7 +795,7 @@ func (c *converter) ConvertPipelineReleaseToPB(ctx context.Context, dbPipeline *
 			return nil, err
 		}
 		if dbPipelineRelease.Recipe.On != nil {
-			for w := range dbPipelineRelease.Recipe.On.Event {
+			for w := range dbPipelineRelease.Recipe.On {
 				webhooks[w] = &pb.Endpoints_WebhookEndpoint{
 					Url: fmt.Sprintf(
 						"%s/v1beta/namespaces/%s/pipelines/%s/releases/%s/events?event=%s&code=%s",
@@ -887,7 +879,7 @@ func (c *converter) ConvertPipelineReleasesToPB(ctx context.Context, dbPipeline 
 	return pbPipelineReleases, nil
 }
 
-var supportedInstillFormats = []string{
+var supportedFormats = []string{
 	"boolean", "array:boolean",
 	"boolean", "array:boolean",
 	"string", "array:string",
@@ -900,21 +892,21 @@ var supportedInstillFormats = []string{
 	"file", "array:file",
 }
 
-// For fields without valid "instillFormat", we will fall back to using JSON format.
-func checkInstillFormat(instillFormat string) string {
+// For fields without valid "format", we will fall back to using JSON format.
+func checkFormat(format string) string {
 
 	// We used */* to present document in the past.
-	if instillFormat == "*/*" {
+	if format == "*/*" {
 		return "document"
 	}
-	if instillFormat == "array:*/*" {
+	if format == "array:*/*" {
 		return "array:document"
 	}
 
 	// Remove subtype, for example, image/jpeg -> image
-	instillFormat, _, _ = strings.Cut(instillFormat, "/")
-	if slices.Contains(supportedInstillFormats, instillFormat) {
-		return instillFormat
+	format, _, _ = strings.Cut(format, "/")
+	if slices.Contains(supportedFormats, format) {
+		return format
 	}
 
 	return "json"
@@ -941,8 +933,9 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 		b, _ := json.Marshal(v)
 		p := &structpb.Struct{}
 		_ = protojson.Unmarshal(b, p)
-		if _, ok := p.Fields["instillFormat"]; ok {
-			p.Fields["instillFormat"] = structpb.NewStringValue(checkInstillFormat(utils.ConvertInstillFormat(p.Fields["instillFormat"].GetStringValue())))
+		if _, ok := p.Fields["format"]; ok {
+			p.Fields["format"] = structpb.NewStringValue(checkFormat(p.Fields["format"].GetStringValue()))
+
 		}
 		dataInput.Fields["properties"].GetStructValue().Fields[k] = structpb.NewStructValue(p)
 	}
@@ -962,15 +955,15 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 			str = str[2:]
 			str = str[:len(str)-1]
 			str = strings.ReplaceAll(str, " ", "")
-			str, err = data.StandardizePath(str)
+			p, err := path.NewPath(str)
 			if err != nil {
-				break
+				return nil, err
 			}
-
-			str = str[1 : len(str)-1]
-			compID := ""
-			compID, str, _ = strings.Cut(str, "][")
-			compID = compID[1 : len(compID)-1] // remove ""
+			seg, remainingPath, err := p.TrimFirst()
+			if err != nil {
+				return nil, err
+			}
+			compID := seg.Key
 			upstreamCompID := ""
 			for id := range compsOrigin {
 				if id == compID {
@@ -983,15 +976,18 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 				if compID == constant.SegVariable {
 					walk = structpb.NewStructValue(dataInput)
 				} else {
-					seg := ""
-					seg, str, _ = strings.Cut(str, "][")
-					seg = seg[1 : len(seg)-1] // remove ""
+
+					seg, remainingPath, err = remainingPath.TrimFirst()
+					if err != nil {
+						return nil, err
+					}
+
 					comp := compsOrigin[upstreamCompID]
 
 					switch comp.Type {
 					case datamodel.Iterator:
 
-						if seg == constant.SegOutput {
+						if seg.Key == constant.SegOutput {
 							walk = structpb.NewStructValue(comp.DataSpecification.Output)
 						} else {
 							return nil, fmt.Errorf("generate pipeline data spec error")
@@ -1012,9 +1008,9 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 							return nil, fmt.Errorf("generate pipeline data spec error")
 						}
 
-						if seg == constant.SegOutput {
+						if seg.Key == constant.SegOutput {
 							walk = structpb.NewStructValue(output)
-						} else if seg == constant.SegInput {
+						} else if seg.Key == constant.SegInput {
 							walk = structpb.NewStructValue(input)
 						} else {
 							return nil, fmt.Errorf("generate pipeline data spec error")
@@ -1023,16 +1019,17 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 				}
 
 				for {
-					if len(str) == 0 {
+					if remainingPath == nil || remainingPath.IsEmpty() {
 						break
 					}
 
-					curr := ""
-					curr, str, _ = strings.Cut(str, "][")
+					seg, remainingPath, err = remainingPath.TrimFirst()
+					if err != nil {
+						return nil, err
+					}
 
-					if curr[0] == '"' && curr[len(curr)-1] == '"' {
-						curr = curr[1 : len(curr)-1] // remove ""
-
+					if seg.SegmentType == path.KeySegment {
+						curr := seg.Key
 						if _, ok := walk.GetStructValue().Fields["properties"]; ok {
 							if _, ok := walk.GetStructValue().Fields["properties"].GetStructValue().Fields[curr]; !ok {
 								break
@@ -1042,24 +1039,28 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 						}
 
 						walk = walk.GetStructValue().Fields["properties"].GetStructValue().Fields[curr]
-					} else {
-						_, err = strconv.Atoi(curr)
-						if err != nil {
-							break
-						}
+					} else if seg.SegmentType == path.IndexSegment {
 						walk = walk.GetStructValue().Fields["items"]
+					} else {
+						walk, _ = structpb.NewValue(map[string]interface{}{
+							"title":       v.Title,
+							"description": v.Description,
+							"format":      "json",
+						})
 					}
 
 				}
 				if walk.GetStructValue() != nil && walk.GetStructValue().Fields != nil {
-					instillFormat := walk.GetStructValue().Fields["instillFormat"].GetStringValue()
+					format := walk.GetStructValue().Fields["format"].GetStringValue()
 					m, err = structpb.NewValue(map[string]interface{}{
-						"title":          v.Title,
-						"description":    v.Description,
-						"instillUIOrder": v.InstillUIOrder,
-						"type":           walk.GetStructValue().Fields["type"].GetStringValue(),
-						"instillFormat":  checkInstillFormat(instillFormat),
+						"title":       v.Title,
+						"description": v.Description,
+						"type":        walk.GetStructValue().Fields["type"].GetStringValue(),
+						"format":      checkFormat(format),
 					})
+					if err != nil {
+						return nil, err
+					}
 				}
 
 			} else {
@@ -1068,11 +1069,10 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 
 		} else {
 			m, err = structpb.NewValue(map[string]interface{}{
-				"title":          v.Title,
-				"description":    v.Description,
-				"instillUIOrder": v.InstillUIOrder,
-				"type":           "string",
-				"instillFormat":  "string",
+				"title":         v.Title,
+				"description":   v.Description,
+				"type":          "string",
+				"instillFormat": "string",
 			})
 		}
 
@@ -1080,7 +1080,7 @@ func (c *converter) GeneratePipelineDataSpec(variables map[string]*datamodel.Var
 			success = false
 		} else {
 			if _, ok := m.GetStructValue().Fields["instillFormat"]; ok {
-				m.GetStructValue().Fields["instillFormat"] = structpb.NewStringValue(utils.ConvertInstillFormat(m.GetStructValue().Fields["instillFormat"].GetStringValue()))
+				m.GetStructValue().Fields["instillFormat"] = structpb.NewStringValue(m.GetStructValue().Fields["instillFormat"].GetStringValue())
 			}
 			dataOutput.Fields["properties"].GetStructValue().Fields[k] = m
 		}

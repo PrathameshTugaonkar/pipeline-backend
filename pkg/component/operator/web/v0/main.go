@@ -1,4 +1,4 @@
-//go:generate compogen readme ./config ./README.mdx --extraContents TASK_SCRAPE_PAGE=.compogen/scrape_page.mdx --extraContents bottom=.compogen/bottom.mdx
+//go:generate compogen readme ./config ./README.mdx --extraContents TASK_SCRAPE_PAGES=.compogen/scrape_page.mdx --extraContents bottom=.compogen/bottom.mdx
 package web
 
 import (
@@ -17,7 +17,7 @@ import (
 
 const (
 	taskCrawlSite     = "TASK_CRAWL_SITE"
-	taskScrapePage    = "TASK_SCRAPE_PAGE"
+	taskScrapePages   = "TASK_SCRAPE_PAGES"
 	taskScrapeSitemap = "TASK_SCRAPE_SITEMAP"
 )
 
@@ -37,15 +37,15 @@ type component struct {
 
 type execution struct {
 	base.ComponentExecution
-	execute               func(*structpb.Struct) (*structpb.Struct, error)
-	externalCaller        func(url string) (ioCloser io.ReadCloser, err error)
-	getDocAfterRequestURL func(url string, timeout int, scrapeMethod string) (*goquery.Document, error)
+	execute                 func(*structpb.Struct) (*structpb.Struct, error)
+	externalCaller          func(url string) (ioCloser io.ReadCloser, err error)
+	getDocsAfterRequestURLs func(urls []string, timeout int, scrapeMethod string) ([]*goquery.Document, error)
 }
 
 func Init(bc base.Component) *component {
 	once.Do(func() {
 		comp = &component{Component: bc}
-		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil)
+		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -65,9 +65,9 @@ func (c *component) CreateExecution(x base.ComponentExecution) (base.IExecution,
 		// To make mocking easier
 		e.externalCaller = scrapSitemapCaller
 		e.execute = e.ScrapeSitemap
-	case taskScrapePage:
-		e.getDocAfterRequestURL = getDocAfterRequestURL
-		e.execute = e.ScrapeWebpage
+	case taskScrapePages:
+		e.getDocsAfterRequestURLs = getDocAfterRequestURL
+		e.execute = e.ScrapeWebpages
 	default:
 		return nil, fmt.Errorf("%s task is not supported", x.Task)
 	}

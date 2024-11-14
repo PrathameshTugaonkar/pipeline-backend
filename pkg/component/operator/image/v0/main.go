@@ -10,8 +10,6 @@ import (
 	_ "image/gif"
 	_ "image/png"
 
-	"google.golang.org/protobuf/types/known/structpb"
-
 	"github.com/instill-ai/pipeline-backend/pkg/component/base"
 )
 
@@ -30,13 +28,13 @@ type component struct {
 
 type execution struct {
 	base.ComponentExecution
-	execute func(*structpb.Struct, *base.Job, context.Context) (*structpb.Struct, error)
+	execute func(context.Context, *base.Job) error
 }
 
 func Init(bc base.Component) *component {
 	once.Do(func() {
 		comp = &component{Component: bc}
-		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil)
+		err := comp.LoadDefinition(definitionJSON, nil, tasksJSON, nil, nil)
 		if err != nil {
 			panic(err)
 		}

@@ -15,7 +15,6 @@ import (
 	"github.com/PaesslerAG/jsonpath"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/gofrs/uuid"
-	"github.com/santhosh-tekuri/jsonschema/v5"
 	"go.einride.tech/aip/filtering"
 	"go.einride.tech/aip/ordering"
 	"go.temporal.io/api/enums/v1"
@@ -41,10 +40,10 @@ import (
 	"github.com/instill-ai/pipeline-backend/pkg/worker"
 	"github.com/instill-ai/x/errmsg"
 
-	componentbase "github.com/instill-ai/pipeline-backend/pkg/component/base"
 	errdomain "github.com/instill-ai/pipeline-backend/pkg/errors"
 	mgmtpb "github.com/instill-ai/protogen-go/core/mgmt/v1beta"
 	pipelinepb "github.com/instill-ai/protogen-go/vdp/pipeline/v1beta"
+	resourcex "github.com/instill-ai/x/resource"
 )
 
 var preserveTags = []string{"featured", "feature"}
@@ -327,9 +326,13 @@ func (s *service) setSchedulePipeline(ctx context.Context, ns resource.Namespace
 	}
 
 	crons := []string{}
-	if recipe != nil && recipe.On != nil && recipe.On.Schedule != nil {
-		for _, v := range recipe.On.Schedule {
-			crons = append(crons, v.Cron)
+	if recipe != nil && recipe.On != nil {
+		for _, v := range recipe.On {
+			// TODO: Introduce Schedule Component to define structured schema
+			// for schedule setup configuration
+			if v.Type == "schedule" {
+				crons = append(crons, v.Config["cron"].(string))
+			}
 		}
 	}
 
@@ -688,46 +691,12 @@ func (s *service) preTriggerPipeline(ctx context.Context, ns resource.Namespace,
 		return ErrExceedMaxBatchSize
 	}
 
-	var metadata []byte
+	formatMap := map[string]string{}
+	defaultValueMap := map[string]any{}
 
-	instillFormatMap := map[string]string{}
-
-	schStruct := &structpb.Struct{Fields: make(map[string]*structpb.Value)}
-	schStruct.Fields["type"] = structpb.NewStringValue("object")
 	for k, v := range r.Variable {
-		v.InstillFormat = utils.ConvertInstillFormat(v.InstillFormat)
-		instillFormatMap[k] = v.InstillFormat
-	}
-
-	b, _ := json.Marshal(r.Variable)
-	properties := &structpb.Struct{}
-	_ = protojson.Unmarshal(b, properties)
-	schStruct.Fields["properties"] = structpb.NewStructValue(properties)
-	err := componentbase.CompileInstillAcceptFormats(schStruct)
-	if err != nil {
-		return err
-	}
-	err = componentbase.CompileInstillFormat(schStruct)
-	if err != nil {
-		return err
-	}
-	metadata, err = protojson.Marshal(schStruct)
-	if err != nil {
-		return err
-	}
-
-	c := jsonschema.NewCompiler()
-	c.RegisterExtension("instillAcceptFormats", componentbase.InstillAcceptFormatsMeta, componentbase.InstillAcceptFormatsCompiler{})
-	c.RegisterExtension("instillFormat", componentbase.InstillFormatMeta, componentbase.InstillFormatCompiler{})
-
-	if err := c.AddResource("schema.json", strings.NewReader(string(metadata))); err != nil {
-		return err
-	}
-
-	sch, err := c.Compile("schema.json")
-
-	if err != nil {
-		return err
+		formatMap[k] = v.Format
+		defaultValueMap[k] = v.Default
 	}
 
 	errors := []string{}
@@ -750,23 +719,32 @@ func (s *service) preTriggerPipeline(ctx context.Context, ns resource.Namespace,
 		for k := range m {
 			switch s := m[k].(type) {
 			case string:
-				if instillFormatMap[k] != "string" {
+				if formatMap[k] != "string" {
+					// Skip the base64 decoding if the string is a URL
+					if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+						continue
+					}
 					if !strings.HasPrefix(s, "data:") {
 						b, err := base64.StdEncoding.DecodeString(s)
 						if err != nil {
-							return fmt.Errorf("can not decode file %s, %s", instillFormatMap[k], s)
+							return fmt.Errorf("can not decode file %s, %s", formatMap[k], s)
 						}
 						mimeType := strings.Split(mimetype.Detect(b).String(), ";")[0]
 						vars.Fields[k] = structpb.NewStringValue(fmt.Sprintf("data:%s;base64,%s", mimeType, s))
 					}
+
 				}
 			case []string:
-				if instillFormatMap[k] != "array:string" {
+				if formatMap[k] != "array:string" {
 					for idx := range s {
+						// Skip the base64 decoding if the string is a URL
+						if strings.HasPrefix(s[idx], "http://") || strings.HasPrefix(s[idx], "https://") {
+							continue
+						}
 						if !strings.HasPrefix(s[idx], "data:") {
 							b, err := base64.StdEncoding.DecodeString(s[idx])
 							if err != nil {
-								return fmt.Errorf("can not decode file %s, %s", instillFormatMap[k], s)
+								return fmt.Errorf("can not decode file %s, %s", formatMap[k], s)
 							}
 							mimeType := strings.Split(mimetype.Detect(b).String(), ";")[0]
 							vars.Fields[k].GetListValue().GetValues()[idx] = structpb.NewStringValue(fmt.Sprintf("data:%s;base64,%s", mimeType, s[idx]))
@@ -777,17 +755,6 @@ func (s *service) preTriggerPipeline(ctx context.Context, ns resource.Namespace,
 			}
 		}
 
-		if err = sch.Validate(m); err != nil {
-			e := err.(*jsonschema.ValidationError)
-
-			for _, valErr := range e.DetailedOutput().Errors {
-				inputPath := fmt.Sprintf("%s/%d", "inputs", idx)
-				componentbase.FormatErrors(inputPath, valErr, &errors)
-				for _, subValErr := range valErr.Errors {
-					componentbase.FormatErrors(inputPath, subValErr, &errors)
-				}
-			}
-		}
 	}
 
 	if len(errors) > 0 {
@@ -800,141 +767,308 @@ func (s *service) preTriggerPipeline(ctx context.Context, ns resource.Namespace,
 	}
 
 	formats := map[string][]string{}
-	for k, v := range instillFormatMap {
+	for k, v := range formatMap {
 		formats[k] = []string{v}
 	}
 
 	for idx, d := range pipelineData {
 
-		// TODO: refactor array parser
-		variable := data.NewMap(nil)
-		for k, v := range d.Variable.Fields {
-			if _, ok := instillFormatMap[k]; !ok {
+		variable := data.Map{}
+		for k := range formatMap {
+			v := d.Variable.Fields[k]
+			if _, ok := formatMap[k]; !ok {
 				continue
 			}
-			switch instillFormatMap[k] {
+
+			if v == nil {
+				if d, ok := defaultValueMap[k]; !ok || d == nil {
+					return fmt.Errorf("%w: missing or invalid value for %s field \"%s\"", errdomain.ErrInvalidArgument, formatMap[k], k)
+				}
+			}
+
+			switch formatMap[k] {
 			case "boolean":
-				variable.Fields[k] = data.NewBoolean(v.GetBoolValue())
+				if v == nil {
+					variable[k] = data.NewBoolean(defaultValueMap[k].(bool))
+				} else {
+					variable[k] = data.NewBoolean(v.GetBoolValue())
+				}
 			case "array:boolean":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx] = data.NewBoolean(val.GetBoolValue())
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx] = data.NewBoolean(val.(bool))
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx] = data.NewBoolean(val.GetBoolValue())
+					}
+					variable[k] = array
 				}
-				variable.Fields[k] = array
 			case "string":
-				variable.Fields[k] = data.NewString(v.GetStringValue())
+				if v == nil {
+					variable[k] = data.NewString(defaultValueMap[k].(string))
+				} else {
+					variable[k] = data.NewString(v.GetStringValue())
+				}
 			case "array:string":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx] = data.NewString(val.GetStringValue())
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx] = data.NewString(val.(string))
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx] = data.NewString(val.GetStringValue())
+					}
+					variable[k] = array
 				}
-				variable.Fields[k] = array
 			case "integer":
-				variable.Fields[k] = data.NewNumberFromFloat(v.GetNumberValue())
+				if v == nil {
+					variable[k] = data.NewNumberFromFloat(defaultValueMap[k].(float64))
+				} else {
+					variable[k] = data.NewNumberFromFloat(v.GetNumberValue())
+				}
 			case "array:integer":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx] = data.NewNumberFromFloat(val.GetNumberValue())
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx] = data.NewNumberFromFloat(val.(float64))
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx] = data.NewNumberFromFloat(val.GetNumberValue())
+					}
+					variable[k] = array
 				}
-				variable.Fields[k] = array
 			case "number":
-				variable.Fields[k] = data.NewNumberFromFloat(v.GetNumberValue())
-			case "array:number":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx] = data.NewNumberFromFloat(val.GetNumberValue())
+				if v == nil {
+					variable[k] = data.NewNumberFromFloat(defaultValueMap[k].(float64))
+				} else {
+					variable[k] = data.NewNumberFromFloat(v.GetNumberValue())
 				}
-				variable.Fields[k] = array
+			case "array:number":
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx] = data.NewNumberFromFloat(val.(float64))
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx] = data.NewNumberFromFloat(val.GetNumberValue())
+					}
+					variable[k] = array
+				}
 			case "image", "image/*":
-				variable.Fields[k], err = data.NewImageFromURL(v.GetStringValue())
-				if err != nil {
-					return err
+				if v == nil {
+					variable[k], err = data.NewImageFromURL(defaultValueMap[k].(string))
+					if err != nil {
+						return err
+					}
+				} else {
+					variable[k], err = data.NewImageFromURL(v.GetStringValue())
+					if err != nil {
+						return err
+					}
 				}
 			case "array:image", "array:image/*":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx], err = data.NewImageFromURL(val.GetStringValue())
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx], err = data.NewImageFromURL(val.(string))
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx], err = data.NewImageFromURL(val.GetStringValue())
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				}
+			case "audio", "audio/*":
+				if v == nil {
+					variable[k], err = data.NewAudioFromURL(defaultValueMap[k].(string))
 					if err != nil {
 						return err
 					}
-				}
-				variable.Fields[k] = array
-			case "audio", "audio/*":
-				variable.Fields[k], err = data.NewAudioFromURL(v.GetStringValue())
-				if err != nil {
-					return err
+				} else {
+					variable[k], err = data.NewAudioFromURL(v.GetStringValue())
+					if err != nil {
+						return err
+					}
 				}
 			case "array:audio", "array:audio/*":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx], err = data.NewAudioFromURL(val.GetStringValue())
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx], err = data.NewAudioFromURL(val.(string))
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx], err = data.NewAudioFromURL(val.GetStringValue())
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				}
+			case "video", "video/*":
+				if v == nil {
+					variable[k], err = data.NewVideoFromURL(defaultValueMap[k].(string))
 					if err != nil {
 						return err
 					}
-				}
-				variable.Fields[k] = array
-			case "video", "video/*":
-				variable.Fields[k], err = data.NewVideoFromURL(v.GetStringValue())
-				if err != nil {
-					return err
+				} else {
+					variable[k], err = data.NewVideoFromURL(v.GetStringValue())
+					if err != nil {
+						return err
+					}
 				}
 			case "array:video", "array:video/*":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx], err = data.NewVideoFromURL(val.(string))
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx], err = data.NewVideoFromURL(val.GetStringValue())
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				}
 
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx], err = data.NewVideoFromURL(val.GetStringValue())
+			case "document":
+				if v == nil {
+					variable[k], err = data.NewDocumentFromURL(defaultValueMap[k].(string))
+					if err != nil {
+						return err
+					}
+				} else {
+					variable[k], err = data.NewDocumentFromURL(v.GetStringValue())
 					if err != nil {
 						return err
 					}
 				}
-				variable.Fields[k] = array
-			case "document", "file", "*/*":
-				variable.Fields[k], err = data.NewDocumentFromURL(v.GetStringValue())
-				if err != nil {
-					return err
+			case "array:document":
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx], err = data.NewDocumentFromURL(val.(string))
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx], err = data.NewDocumentFromURL(val.GetStringValue())
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
 				}
-			case "array:document", "array:file", "array:*/*":
-				array := data.NewArray(make([]data.Value, len(v.GetListValue().Values)))
-				for idx, val := range v.GetListValue().Values {
-					array.Values[idx], err = data.NewDocumentFromURL(val.GetStringValue())
+			case "file", "*/*":
+				if v == nil {
+					variable[k], err = data.NewBinaryFromURL(defaultValueMap[k].(string))
+					if err != nil {
+						return err
+					}
+				} else {
+					variable[k], err = data.NewBinaryFromURL(v.GetStringValue())
 					if err != nil {
 						return err
 					}
 				}
-				variable.Fields[k] = array
+			case "array:file", "array:*/*":
+				if v == nil {
+					array := make(data.Array, len(defaultValueMap[k].([]any)))
+					for idx, val := range defaultValueMap[k].([]any) {
+						array[idx], err = data.NewBinaryFromURL(val.(string))
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				} else {
+					array := make(data.Array, len(v.GetListValue().Values))
+					for idx, val := range v.GetListValue().Values {
+						array[idx], err = data.NewBinaryFromURL(val.GetStringValue())
+						if err != nil {
+							return err
+						}
+					}
+					variable[k] = array
+				}
 			case "semi-structured/*", "semi-structured/json", "json":
 
-				switch v.Kind.(type) {
-				case *structpb.Value_StructValue:
-					j := map[string]any{}
-					b, err := protojson.Marshal(v)
+				if v == nil {
+					jv, err := data.NewJSONValue(defaultValueMap[k])
 					if err != nil {
 						return err
 					}
-					err = json.Unmarshal(b, &j)
-					if err != nil {
-						return err
+					variable[k] = jv
+				} else {
+					switch v.Kind.(type) {
+					case *structpb.Value_StructValue:
+						j := map[string]any{}
+						b, err := protojson.Marshal(v)
+						if err != nil {
+							return err
+						}
+						err = json.Unmarshal(b, &j)
+						if err != nil {
+							return err
+						}
+						jv, err := data.NewJSONValue(j)
+						if err != nil {
+							return err
+						}
+						variable[k] = jv
+					case *structpb.Value_ListValue:
+						j := []any{}
+						b, err := protojson.Marshal(v)
+						if err != nil {
+							return err
+						}
+						err = json.Unmarshal(b, &j)
+						if err != nil {
+							return err
+						}
+						jv, err := data.NewJSONValue(j)
+						if err != nil {
+							return err
+						}
+						variable[k] = jv
 					}
-					jv, err := data.NewJSONValue(j)
-					if err != nil {
-						return err
-					}
-					variable.Fields[k] = jv
-				case *structpb.Value_ListValue:
-					j := []any{}
-					b, err := protojson.Marshal(v)
-					if err != nil {
-						return err
-					}
-					err = json.Unmarshal(b, &j)
-					if err != nil {
-						return err
-					}
-					jv, err := data.NewJSONValue(j)
-					if err != nil {
-						return err
-					}
-					variable.Fields[k] = jv
 				}
 
 			}
@@ -947,9 +1081,9 @@ func (s *service) preTriggerPipeline(ctx context.Context, ns resource.Namespace,
 			return err
 		}
 
-		secret := data.NewMap(nil)
+		secret := data.Map{}
 		for k, v := range d.Secret {
-			secret.Fields[k] = data.NewString(v)
+			secret[k] = data.NewString(v)
 		}
 		err = wfm.Set(ctx, idx, constant.SegSecret, secret)
 		if err != nil {
@@ -1222,10 +1356,11 @@ func (s *service) triggerPipeline(
 		},
 	}
 
-	userUID := uuid.FromStringOrNil(resource.GetRequestSingleHeader(ctx, constant.HeaderUserUIDKey))
-	requesterUID := uuid.FromStringOrNil(resource.GetRequestSingleHeader(ctx, constant.HeaderRequesterUIDKey))
-	if requesterUID.IsNil() {
-		requesterUID = userUID
+	requesterUID, userUID := resourcex.GetRequesterUIDAndUserUID(ctx)
+
+	expiryRuleTag, err := s.retentionHandler.GetExpiryTagBySubscriptionPlan(ctx, requesterUID)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	we, err := s.temporalClient.ExecuteWorkflow(
@@ -1242,9 +1377,10 @@ func (s *service) triggerPipeline(
 				PipelineReleaseUID:   pipelineReleaseUID,
 				PipelineOwnerType:    ns.NsType,
 				PipelineOwnerUID:     ns.NsUID,
-				PipelineUserUID:      userUID,
-				PipelineRequesterUID: requesterUID,
+				PipelineUserUID:      uuid.FromStringOrNil(userUID),
+				PipelineRequesterUID: uuid.FromStringOrNil(requesterUID),
 				HeaderAuthorization:  resource.GetRequestSingleHeader(ctx, "authorization"),
+				ExpiryRuleTag:        expiryRuleTag,
 			},
 			Mode:      mgmtpb.Mode_MODE_SYNC,
 			WorkerUID: s.workerUID,
@@ -1307,10 +1443,11 @@ func (s *service) triggerAsyncPipeline(
 		},
 	}
 
-	userUID := uuid.FromStringOrNil(resource.GetRequestSingleHeader(ctx, constant.HeaderUserUIDKey))
-	requesterUID := uuid.FromStringOrNil(resource.GetRequestSingleHeader(ctx, constant.HeaderRequesterUIDKey))
-	if requesterUID.IsNil() {
-		requesterUID = userUID
+	requesterUID, userUID := resourcex.GetRequesterUIDAndUserUID(ctx)
+
+	expiryRuleTag, err := s.retentionHandler.GetExpiryTagBySubscriptionPlan(ctx, requesterUID)
+	if err != nil {
+		return nil, err
 	}
 
 	we, err := s.temporalClient.ExecuteWorkflow(
@@ -1326,9 +1463,10 @@ func (s *service) triggerAsyncPipeline(
 				PipelineReleaseUID:   pipelineReleaseUID,
 				PipelineOwnerType:    ns.NsType,
 				PipelineOwnerUID:     ns.NsUID,
-				PipelineUserUID:      userUID,
-				PipelineRequesterUID: requesterUID,
+				PipelineUserUID:      uuid.FromStringOrNil(userUID),
+				PipelineRequesterUID: uuid.FromStringOrNil(requesterUID),
 				HeaderAuthorization:  resource.GetRequestSingleHeader(ctx, "authorization"),
+				ExpiryRuleTag:        expiryRuleTag,
 			},
 			Mode:           mgmtpb.Mode_MODE_ASYNC,
 			TriggerFromAPI: true,
@@ -1520,8 +1658,7 @@ func (s *service) HandleNamespacePipelineEventByID(ctx context.Context, ns resou
 		}
 	}()
 
-	if e, ok := dbPipeline.Recipe.On.Event[eventID]; ok {
-
+	if e, ok := dbPipeline.Recipe.On[eventID]; ok {
 		targetType = e.Type
 	} else {
 		return nil, fmt.Errorf("eventID not correct")

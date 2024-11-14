@@ -27,6 +27,8 @@ var (
 	setupJSON []byte
 	//go:embed config/tasks.json
 	tasksJSON []byte
+	//go:embed config/event.json
+	eventJSON []byte
 
 	once sync.Once
 	comp *component
@@ -46,6 +48,7 @@ type SlackClient interface {
 
 type component struct {
 	base.Component
+	base.OAuthConnector
 }
 
 type execution struct {
@@ -68,7 +71,7 @@ func (e *execution) userToken() string {
 func Init(bc base.Component) *component {
 	once.Do(func() {
 		comp = &component{Component: bc}
-		err := comp.LoadDefinition(definitionJSON, setupJSON, tasksJSON, nil)
+		err := comp.LoadDefinition(definitionJSON, setupJSON, tasksJSON, eventJSON, nil)
 		if err != nil {
 			panic(err)
 		}
@@ -137,4 +140,9 @@ func (c *component) HandleVerificationEvent(header map[string][]string, req *str
 func (c *component) ParseEvent(ctx context.Context, req *structpb.Struct, setup map[string]any) (parsed *structpb.Struct, err error) {
 	// TODO: parse and validate event
 	return req, nil
+}
+
+// SupportsOAuth checks whether the component is configured to support OAuth.
+func (c *component) SupportsOAuth() bool {
+	return c.OAuthConnector.SupportsOAuth()
 }

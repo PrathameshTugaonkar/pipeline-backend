@@ -3,6 +3,7 @@ package text
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/tmc/langchaingo/textsplitter"
 
@@ -10,38 +11,38 @@ import (
 )
 
 type ChunkTextInput struct {
-	Text     string   `json:"text"`
-	Strategy Strategy `json:"strategy"`
+	Text     string   `instill:"text"`
+	Strategy Strategy `instill:"strategy"`
 }
 
 type Strategy struct {
-	Setting Setting `json:"setting"`
+	Setting Setting `instill:"setting"`
 }
 
 type Setting struct {
-	ChunkMethod       string   `json:"chunk-method,omitempty"`
-	ChunkSize         int      `json:"chunk-size,omitempty"`
-	ChunkOverlap      int      `json:"chunk-overlap,omitempty"`
-	ModelName         string   `json:"model-name,omitempty"`
-	AllowedSpecial    []string `json:"allowed-special,omitempty"`
-	DisallowedSpecial []string `json:"disallowed-special,omitempty"`
-	Separators        []string `json:"separators,omitempty"`
-	KeepSeparator     bool     `json:"keep-separator,omitempty"`
-	CodeBlocks        bool     `json:"code-blocks,omitempty"`
+	ChunkMethod       string   `instill:"chunk-method"`
+	ChunkSize         int      `instill:"chunk-size"`
+	ChunkOverlap      int      `instill:"chunk-overlap"`
+	ModelName         string   `instill:"model-name"`
+	AllowedSpecial    []string `instill:"allowed-special"`
+	DisallowedSpecial []string `instill:"disallowed-special"`
+	Separators        []string `instill:"separators"`
+	KeepSeparator     bool     `instill:"keep-separator"`
+	CodeBlocks        bool     `instill:"code-blocks"`
 }
 
 type ChunkTextOutput struct {
-	ChunkNum         int         `json:"chunk-num"`
-	TextChunks       []TextChunk `json:"text-chunks"`
-	TokenCount       int         `json:"token-count"`
-	ChunksTokenCount int         `json:"chunks-token-count"`
+	ChunkNum         int         `instill:"chunk-num"`
+	TextChunks       []TextChunk `instill:"text-chunks"`
+	TokenCount       int         `instill:"token-count"`
+	ChunksTokenCount int         `instill:"chunks-token-count"`
 }
 
 type TextChunk struct {
-	Text          string `json:"text"`
-	StartPosition int    `json:"start-position"`
-	EndPosition   int    `json:"end-position"`
-	TokenCount    int    `json:"token-count"`
+	Text          string `instill:"text"`
+	StartPosition int    `instill:"start-position"`
+	EndPosition   int    `instill:"end-position"`
+	TokenCount    int    `instill:"token-count"`
 }
 
 func (s *Setting) SetDefault() {
@@ -184,18 +185,29 @@ func chunkMarkdown(input ChunkTextInput) (ChunkTextOutput, error) {
 
 	tkm, err := tiktoken.EncodingForModel(setting.ModelName)
 
+	mergedChunks := mergeChunks(chunks, input, tkm)
 	if err != nil {
 		return output, fmt.Errorf("failed to get encoding for model: %w", err)
 	}
 
 	totalTokenCount := 0
-	for _, chunk := range chunks {
-		token := tkm.Encode(chunk.Chunk, setting.AllowedSpecial, setting.DisallowedSpecial)
+	for _, mergedChunk := range mergedChunks {
+		token := tkm.Encode(mergedChunk.Chunk, setting.AllowedSpecial, setting.DisallowedSpecial)
+
+		// Now, it will be over the chunk size when the table row is too long, and it mainly comes from the limitation of LLM.
+		// So, we decide to fix it temporarily by deleting the over part of the chunk.
+		if len(token) > setting.ChunkSize {
+			token = token[:setting.ChunkSize]
+			// Decode the token to string could get the invalid utf8 string, so we need to convert it to valid utf8 string.
+			decodedChunk := tkm.Decode(token)
+			utf8ValidString := strings.ToValidUTF8(decodedChunk, "")
+			mergedChunk.Chunk = utf8ValidString
+		}
 
 		output.TextChunks = append(output.TextChunks, TextChunk{
-			Text:          chunk.Chunk,
-			StartPosition: chunk.ContentStartPosition,
-			EndPosition:   chunk.ContentEndPosition,
+			Text:          mergedChunk.Chunk,
+			StartPosition: mergedChunk.ContentStartPosition,
+			EndPosition:   mergedChunk.ContentEndPosition,
 			TokenCount:    len(token),
 		})
 		totalTokenCount += len(token)
